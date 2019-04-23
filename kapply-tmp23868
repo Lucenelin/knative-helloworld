@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysecrets
+  annotations:
+    build.knative.dev/docker-0: https://index.docker.io/v1/
+type: kubernetes.io/basic-auth
+stringData:
+  git_accesstoken: 81d25152b752900a0106299a8d4526784c2f6c6a
+  git_secrettoken: 123456
+  username: admin
+  password: admin
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: build-bot
+secrets:
+- name: mysecrets
+
+---
+# Give our "default" ServiceAccount permission to touch Knative Services
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rebuild
+rules:
+- apiGroups:
+  - serving.knative.dev
+  resources:
+  - services
+  verbs:
+  - get
+  - list
+  - update
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rebuild-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rebuild
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: default

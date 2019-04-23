@@ -1,0 +1,173 @@
+#!/bin/bash
+
+# Usage: demo [ --clean | --demo ] [ CLUSTER_NAME ]
+# --clean will erase all old resouces from a previous run
+# --demo will fly thru the setup stuff and then pause when it gets to deploying
+# the apps. Basically, good for a live demo when you don't want to show the
+# prep steps.
+
+set -e
+source .demoscript
+RETRYONFAIL=1
+
+export APP_IMAGE=${APP_IMAGE:-duglin/helloworld}
+export REBUILD_IMAGE=${REBUILD_IMAGE:-duglin/rebuild}
+export GITREPO=${GITREPO:-duglin/helloworld}
+
+skiptodemo=""
+
+function cleanDemo {
+    echo Clean from previous run and rebuild everything
+
+    (
+    set +e
+    kubectl delete \
+        -f service1.yaml \
+        -f github.yaml \
+        -f rebuild.yaml \
+        -f secrets.yaml \
+		-f ingress.yaml
+
+    kubectl delete \
+        clusterchannelprovisioner.eventing.knative.dev/in-memory-channel
+    kubectl delete horizontalpodautoscaler.autoscaling/istio-pilot
+    set -e
+    ) 2> /dev/null
+
+	kubectl delete -f https://raw.githubusercontent.com/knative/build-templates/master/kaniko/kaniko.yaml > /dev/null 2>&1
+
+    rm -f cmds out
+
+    if ! grep "\"Hello World!\"" helloworld.go > /dev/null ; then
+        sed -i 's/text :=.*/text := "Hello World!"/' helloworld.go
+        git add helloworld.go
+        git commit -s -m "clean"
+        git push origin master
+    fi
+    make
+}
+
+# Parse our command line options
+while [[ "$1" == "--"* ]]; do
+    case "$1" in
+    --clean)  cleanDemo ; exit 0 ;;
+	--demo) skiptodemo=1 ; skip=1 ;;
+    *) echo "Uknown option '$1'" ; exit 1 ;;
+    esac
+    shift
+done
+
+CLUSTER=${1:-${KUBECONFIG##*-}}
+export CLUSTER=${CLUSTER%.yml}
+
+comment Set our KUBECONF env var
+if [[ ! -n "${useSaved}" ]]; then
+    ic config --check-version false
+fi
+doit ic ks cluster-config -s --export ${CLUSTER}
+doit $(cat out)
+$(cat out)
+
+comment Enable external internet access from our pods
+doit ./kapply ingress.yaml
+
+comment Create the secrets used for accessing DockerHub and Github
+doit ./kapply secrets.yaml
+
+# Clean up from previous run
+# kubectl delete -f service2.yaml > /dev/null 2>&1 || true
+
+doit kubectl apply -f https://raw.githubusercontent.com/knative/build-templates/master/kaniko/kaniko.yaml
+
+if [[ -n "${skiptodemo}" ]]; then
+    skip=""
+fi
+
+### Start of live demo stuff
+
+comment --pause "Start of demo! Clearing the screen"
+clear
+
+scroll helloworld.go
+
+scroll service1.yaml
+doit ./kapply service1.yaml
+
+comment Wait for the app to be deployed
+doit --noscroll --slowoutput ./pods --grep "helloworld.*Running"
+
+wait kubectl get ksvc \| grep helloworld.default
+
+doit kubectl get ksvc
+APPURL=$(grep helloworld out | sed "s/^.* \(helloworld.def.*cloud\).*$/\1/")
+
+wait curl -sf ${APPURL}
+doit curl -sf ${APPURL}
+
+doit ./showresources all
+
+scroll service2.yaml
+doit ./kapply service2.yaml
+doit 'kubectl get ksvc/helloworld -o yaml | grep latestCreatedRevisionName: | sed "s/^.*: [^-]*-//g"' < /dev/null > /dev/null 2>&1
+ver1=$(cat out)
+
+comment Wait for the new version to be deployed
+doit --noscroll --slowoutput ./pods --grep "${ver1}.*Running"
+echo
+
+wait "curl -sf ${APPURL} | grep ${ver1}"
+doit curl -sf ${APPURL}
+doit 'kubectl get ksvc/helloworld -o yaml | grep latestCreatedRevisionName: | sed "s/^.*: [^-]*-//g"' < /dev/null > /dev/null 2>&1
+ver2=$(cat out)
+comment Same output as before but with new revision number
+
+comment --pause "Show to pretty slide!"
+
+comment --pause "Let's deploy the rebuild function that github will call"
+# doit ./kapply -t rebuild.yaml
+scroll rebuild.yaml
+doit ./kapply rebuild.yaml
+wait "kubectl get ksvc | grep rebuild.*True"
+
+comment "Now let's deploy the github webhook, linked to our 'rebuild' function"
+# doit ./kapply -t github.yaml
+scroll github.yaml
+doit ./kapply github.yaml
+wait "kubectl get ksvc | grep githubsource.*True"
+
+comment "Now let's edit our app and push it to github"
+if [[ -n "${skip}" || -n "${useSaved}" ]]; then
+  STRING="Dogs rule!! Cats drool!!"
+  doit sed -i "\"s/text :=.*/text := \\\"${STRING}\\\"/\"" helloworld.go
+else
+  doit --noexec vi helloworld.go
+  vi helloworld.go
+fi
+
+STRING=$(grep "text :=" helloworld.go | sed 's/.*"\([^"]*\)".*$/\1/')
+
+doit git add helloworld.go
+doit git commit -s -m "\"demo - $(date)\""
+doit git push origin master
+
+comment "While we wait, let's look at the 'trigger' in the service"
+scroll service2.yaml
+
+comment "Waiting for new version (look for '$STRING')"
+
+skip="1" doit --untilgrep="^.*: ${STRING}$" --norepaint --pausetime=8 \
+  "curl -sf ${APPURL}"
+
+comment "Now let's do A/B testing... 10% of requests go to version 1"
+scroll service-patch.json
+
+doit 'kubectl get ksvc/helloworld -o yaml | grep latestCreatedRevisionName: | sed "s/^.*: [^-]*-//g"' < /dev/null > /dev/null 2>&1
+ver3=$(cat out)
+
+export LATEST="${ver3}"
+export PREVIOUS="${ver2}"
+doit ./kapply -p ksvc/helloworld service-patch.json
+
+doit --noscroll --slowoutput ./load 10 30 http://${APPURL}
+
+doit ./showresources all

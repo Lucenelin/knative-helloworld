@@ -1,0 +1,8 @@
+# Allow for pods to talk to the internet
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config-network
+  namespace: knative-serving
+data:
+  istio.sidecar.includeOutboundIPRanges: 192.168.0.0/16,172.16.0.1/16,9.110.0.0/16
