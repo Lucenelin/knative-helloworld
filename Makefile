@@ -1,7 +1,7 @@
 all: .helloworld .rebuild load
  
-APP_IMAGE     ?= sdcdev.icp:8500/default/helloworld
-REBUILD_IMAGE ?= sdcdev.icp:8500/default/rebuild
+APP_IMAGE     ?= 9.110.73.178:5000/default/helloworld
+REBUILD_IMAGE ?= 9.110.73.178:5000/default/rebuild
 
 load: load.go
 	go build -o load load.go
